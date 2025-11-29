@@ -1,3 +1,4 @@
+// TODO: code ready for testing. need to use Xcode
 import SwiftUI // Imports the SwiftUI framework for building the user interface.
 import HealthKit // Imports the HealthKit framework for accessing health data like HRV.
 import Combine // Imports the Combine framework for handling asynchronous events and data streams.
