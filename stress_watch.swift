@@ -73,10 +73,10 @@ enum PacerPhase: String { // Defines an enum for the breathing pacer phases, bac
 }
 
 /**
- * PulsePeaceManager: The central state controller (`ObservableObject`).
+ * StressNotOnMyWatchManager: The central state controller (`ObservableObject`).
  * **Modified for Watch Haptics.**
  */
-class PulsePeaceManager: ObservableObject { // Defines the PulsePeaceManager class, conforming to ObservableObject for SwiftUI updates.
+class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMyWatchManager class, conforming to ObservableObject for SwiftUI updates.
     
     // --- Constants ---
     private let THRESHOLD: Double = 50.0 // Constant defining the HRV threshold for stress detection.
@@ -190,7 +190,7 @@ class PulsePeaceManager: ObservableObject { // Defines the PulsePeaceManager cla
     
     // MARK: - Intervention Logic (4-7-8 Pacer)
     
-    func startPeaceSession() { // Function to start the breathing session.
+    func startStressNotOnMyWatchSession() { // Function to start the breathing session.
         guard !isIntervening, let hrv = hrvValue else { return } // Checks if not already intervening and HRV value exists.
         
         preSessionHRV = hrv // Stores the current HRV as the pre-session value.
@@ -208,7 +208,7 @@ class PulsePeaceManager: ObservableObject { // Defines the PulsePeaceManager cla
         sessionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in // Schedules a timer to decrement the session time every second.
             self?.sessionTimeLeft -= 1 // Decrements the remaining time.
             if self?.sessionTimeLeft ?? 0 <= 0 { // Checks if time has run out.
-                self?.endPeaceSession() // Ends the session.
+                self?.endStressNotOnMyWatchSession() // Ends the session.
             }
         }
         sessionTimer?.fire() // Fires the timer immediately.
@@ -262,7 +262,7 @@ class PulsePeaceManager: ObservableObject { // Defines the PulsePeaceManager cla
     
     // MARK: - Session End & Efficacy
     
-    private func endPeaceSession() { // Function to handle the end of a session.
+    private func endStressNotOnMyWatchSession() { // Function to handle the end of a session.
         sessionTimer?.invalidate() // Stops the session timer.
         isIntervening = false // Sets intervening to false.
         sessionTimeLeft = 0 // Resets session time.
@@ -293,16 +293,22 @@ class PulsePeaceManager: ObservableObject { // Defines the PulsePeaceManager cla
 // MARK: - 3. SwiftUI Views (Watch UI Structure)
 
 /**
- * PulsePeaceWatchView: The simplified SwiftUI view for Apple Watch.
+ * StressNotOnMyWatchView: The simplified SwiftUI view for Apple Watch.
  */
-struct PulsePeaceWatchView: View { // Defines the main SwiftUI view for the watch app.
+struct StressNotOnMyWatchView: View { // Defines the main SwiftUI view for the watch app.
     
-    @StateObject var manager = PulsePeaceManager() // Creates a state object for the manager.
+    @StateObject var manager = StressNotOnMyWatchManager() // Creates a state object for the manager.
     
     var body: some View { // Defines the body of the view.
         // Use a ScrollView as the main container for adaptability on small screens.
         ScrollView { // Wraps content in a ScrollView.
-            VStack(spacing: 8) { // Arranges children vertically with spacing.
+            VStack(spacing: 8) {
+                
+                // MARK: App Title
+                Text("Stress? Not on my Watch!")
+                    .font(.headline)
+                    .multilineTextAlignment(.center)
+                    .padding(.bottom, 2) // Arranges children vertically with spacing.
                 
                 // MARK: Status (Top of screen)
                 statusPill // Displays the status pill view.
@@ -328,8 +334,8 @@ struct PulsePeaceWatchView: View { // Defines the main SwiftUI view for the watc
                 
                 // MARK: Action Button
                 // The button spans the width of the screen on Watch.
-                Button(action: manager.startPeaceSession) { // Button to start the session.
-                    Text(manager.isIntervening ? "Session Running" : "START PEACE") // Sets button text based on state.
+                Button(action: manager.startStressNotOnMyWatchSession) { // Button to start the session.
+                    Text(manager.isIntervening ? "Session Running" : "START BREATHING") // Sets button text based on state.
                         .font(.headline) // Sets font.
                         .padding(.vertical, 5) // Adds vertical padding.
                 }
@@ -405,11 +411,11 @@ struct PulsePeaceWatchView: View { // Defines the main SwiftUI view for the watc
 // MARK: - 4. App Entry Point for WatchOS
 
 @main // Attribute to designate the entry point of the app.
-struct PulsePeaceWatchApp: App { // Defines the main app structure.
+struct StressNotOnMyWatchApp: App { // Defines the main app structure.
     // The main entry point for the watchOS application.
     var body: some Scene { // Defines the body of the app.
         WindowGroup { // Creates a window group.
-            PulsePeaceWatchView() // Sets the root view.
+            StressNotOnMyWatchView() // Sets the root view.
         }
     }
 }
