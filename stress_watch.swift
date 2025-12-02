@@ -59,6 +59,39 @@ class HealthKitManager { // Defines the HealthKitManager class to manage HealthK
         }
         healthStore.execute(query) // Executes the query on the health store.
     }
+    
+    
+    /**
+     * Fetch HRV at a specific time: Reads HRV data around a specific timestamp.
+     */
+    /**
+     * Fetch HRV at a specific time: Reads HRV data around a specific timestamp.
+     * Used during calibration to capture HRV when the user reports stress.
+     */
+    func fetchHRV(at date: Date, completion: @escaping (Double?, Error?) -> Void) {
+        let start = date.addingTimeInterval(-900) // 15 minutes before the reported time.
+        let end = date.addingTimeInterval(900)   // 15 minutes after the reported time.
+        
+        // Predicate to find samples within the +/- 15 minute window.
+        let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: .strictEndDate)
+        let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false) // Sort by most recent.
+        
+        // Query for a single HRV sample in that window.
+        let query = HKSampleQuery(sampleType: hrvType, predicate: predicate, limit: 1, sortDescriptors: [sortDescriptor]) {
+            (_, samples, error) in
+            
+            DispatchQueue.main.async {
+                guard let sample = samples?.first as? HKQuantitySample, error == nil else {
+                    completion(nil, error) // Return nil if no sample found or error occurred.
+                    return
+                }
+                
+                let hrvInMS = sample.quantity.doubleValue(for: HKUnit.secondUnit(with: .milli)) // Convert to milliseconds.
+                completion(hrvInMS, nil)
+            }
+        }
+        healthStore.execute(query)
+    }
 }
 
 // MARK: - 2. Application Logic and State Management
@@ -105,7 +138,119 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
     private var isAuthorized = false // Boolean to track if HealthKit authorization has been granted.
 
     init() { // Initializer for the class.
+        loadCalibrationData()
+        checkCalibrationStatus()
         requestHealthKitAuthorization() // Requests HealthKit authorization upon initialization.
+    }
+    
+    // --- Calibration State ---
+    @Published var isCalibrating: Bool = false // Tracks if the app is in the week-long calibration mode.
+    @Published var calibrationDay: Int = 0 // Tracks the current day of the calibration week (1-7).
+    private var calibrationStartDate: Date? // Stores the start date of the calibration period.
+    private var calibrationReadings: [Double] = [] // Stores the list of HRV readings collected during stress reports.
+    private var customThreshold: Double? // Stores the calculated personalized threshold after calibration.
+    
+    // --- Demographics ---
+    @Published var userAge: String = "" // Optional user age.
+    @Published var userGender: String = "Prefer not to say" // Optional user gender.
+    
+    /**
+     * Load Calibration Data: Retrieves persistence state from UserDefaults.
+     */
+    private func loadCalibrationData() {
+        let defaults = UserDefaults.standard
+        isCalibrating = defaults.bool(forKey: "isCalibrating")
+        calibrationStartDate = defaults.object(forKey: "calibrationStartDate") as? Date
+        calibrationReadings = defaults.array(forKey: "calibrationReadings") as? [Double] ?? []
+        customThreshold = defaults.object(forKey: "customThreshold") as? Double
+        
+        userAge = defaults.string(forKey: "userAge") ?? ""
+        userGender = defaults.string(forKey: "userGender") ?? "Prefer not to say"
+    }
+    
+    /**
+     * Save Calibration Data: Persists state to UserDefaults.
+     */
+    private func saveCalibrationData() {
+        let defaults = UserDefaults.standard
+        defaults.set(isCalibrating, forKey: "isCalibrating")
+        defaults.set(calibrationStartDate, forKey: "calibrationStartDate")
+        defaults.set(calibrationReadings, forKey: "calibrationReadings")
+        defaults.set(customThreshold, forKey: "customThreshold")
+        
+        defaults.set(userAge, forKey: "userAge")
+        defaults.set(userGender, forKey: "userGender")
+    }
+    
+    /**
+     * Start Calibration: Initiates the 7-day calibration period.
+     * Resets any previous calibration data.
+     */
+    func startCalibration(age: String, gender: String) {
+        isCalibrating = true
+        calibrationStartDate = Date()
+        calibrationReadings = []
+        customThreshold = nil // Reset threshold to default during new calibration.
+        
+        // Save demographics
+        userAge = age
+        userGender = gender
+        
+        saveCalibrationData()
+        checkCalibrationStatus()
+    }
+    
+    /**
+     * Report Stress: Called when the user taps "I Feel Stressed".
+     * Fetches the current HRV and adds it to the calibration dataset.
+     */
+    func reportStress() {
+        guard isCalibrating else { return }
+        
+        // Fetch HRV at this moment using the new HealthKitManager method.
+        healthKitManager.fetchHRV(at: Date()) { [weak self] hrv, error in
+            guard let self = self, let hrv = hrv else { return }
+            
+            self.calibrationReadings.append(hrv) // Store the reading.
+            self.saveCalibrationData()
+            print("Reported Stress. HRV: \(hrv). Total readings: \(self.calibrationReadings.count)")
+            
+            // Provide visual feedback to the user.
+            self.statusText = "Recorded"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                self.statusText = "Calibrating..."
+            }
+        }
+    }
+    
+    /**
+     * Check Calibration Status: Checks if the 7-day period is over.
+     * If over, calculates the average HRV from reported stress events and sets it as the new threshold.
+     */
+    func checkCalibrationStatus() {
+        if let custom = customThreshold {
+            print("Using custom threshold: \(custom)")
+            return
+        }
+        
+        guard isCalibrating, let startDate = calibrationStartDate else { return }
+        
+        let daysElapsed = Calendar.current.dateComponents([.day], from: startDate, to: Date()).day ?? 0
+        calibrationDay = daysElapsed + 1
+        
+        if daysElapsed >= 7 {
+            // End calibration after 7 days.
+            isCalibrating = false
+            if !calibrationReadings.isEmpty {
+                // Calculate average HRV from all reported stress events.
+                let average = calibrationReadings.reduce(0, +) / Double(calibrationReadings.count)
+                customThreshold = average
+                print("Calibration Complete. New Threshold: \(average)")
+            } else {
+                print("Calibration Complete. No readings. Using default.")
+            }
+            saveCalibrationData()
+        }
     }
     
     /**
@@ -165,7 +310,9 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
         guard let hrv = hrvValue else { return } // Returns if there is no HRV value.
         
         // **STRESS DETECTION RULE**
-        if hrv < THRESHOLD && !isIntervening { // Checks if HRV is below threshold and not intervening.
+        // Use the custom threshold if calibration is complete, otherwise use default.
+        let currentThreshold = customThreshold ?? THRESHOLD
+        if hrv < currentThreshold && !isIntervening { // Checks if HRV is below threshold and not intervening.
             if lowHRVStartTime == nil { // Checks if the low HRV timer has not started.
                 lowHRVStartTime = Date() // Starts the timer by recording the current time.
             } else if let startTime = lowHRVStartTime, Date().timeIntervalSince(startTime) >= 120 { // Checks if 2 minutes have passed since low HRV started.
@@ -300,6 +447,12 @@ struct StressNotOnMyWatchView: View { // Defines the main SwiftUI view for the w
     
     @StateObject var manager = StressNotOnMyWatchManager() // Creates a state object for the manager.
     
+    // --- Survey State ---
+    @State private var showDemographics = false // Controls visibility of the demographic survey.
+    @State private var tempAge = "" // Temporary storage for age input.
+    @State private var tempGender = "Prefer not to say" // Temporary storage for gender input.
+    let genderOptions = ["Male", "Female", "Non-binary", "Other", "Prefer not to say"] // Options for gender picker.
+    
     var body: some View { // Defines the body of the view.
         // Use a ScrollView as the main container for adaptability on small screens.
         ScrollView { // Wraps content in a ScrollView.
@@ -313,6 +466,34 @@ struct StressNotOnMyWatchView: View { // Defines the main SwiftUI view for the w
                 
                 // MARK: Status (Top of screen)
                 statusPill // Displays the status pill view.
+                
+                // MARK: Calibration UI
+                // Only visible when calibration mode is active.
+                if manager.isCalibrating {
+                    VStack(spacing: 5) {
+                        Text("CALIBRATION MODE")
+                            .font(.caption2)
+                            .fontWeight(.bold)
+                            .foregroundColor(.orange)
+                        Text("Day \(manager.calibrationDay)/7") // Shows progress.
+                            .font(.caption2)
+                            .foregroundColor(.gray)
+                        
+                        // Button to report stress events.
+                        Button(action: manager.reportStress) {
+                            Text("I FEEL STRESSED")
+                                .font(.headline)
+                                .foregroundColor(.black)
+                                .padding(.vertical, 5)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                        .padding(.top, 5)
+                    }
+                    .padding()
+                    .background(Color.orange.opacity(0.1))
+                    .cornerRadius(10)
+                }
                 
                 // MARK: Pacer or HRV Display
                 if manager.isIntervening { // Checks if a session is active.
@@ -355,8 +536,73 @@ struct StressNotOnMyWatchView: View { // Defines the main SwiftUI view for the w
                         .foregroundColor(.green) // Sets text color.
                         .cornerRadius(8) // Rounds the corners.
                 }
+                
+                // MARK: Start Calibration Button (Hidden if calibrating)
+                if !manager.isCalibrating {
+                    Button("Start Calibration") {
+                        // Show the demographic survey instead of starting immediately.
+                        showDemographics = true
+                    }
+                    .font(.caption2)
+                    .padding(.top, 10)
+                }
             }
             .padding(.vertical) // Adds vertical padding to the VStack.
+        }
+        // Demographic Survey Sheet
+        .sheet(isPresented: $showDemographics) {
+            ScrollView {
+                VStack(spacing: 10) {
+                    Text("Tell us about you")
+                        .font(.headline)
+                    
+                    Text("These fields are optional and help us tailor your experience.")
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                        .multilineTextAlignment(.center)
+                    
+                    // Age Input
+                    VStack(alignment: .leading) {
+                        Text("Age").font(.caption)
+                        TextField("Optional", text: $tempAge)
+                        #if os(iOS)
+                            .keyboardType(.numberPad)
+                        #endif
+                    }
+                    
+                    // Gender Picker
+                    VStack(alignment: .leading) {
+                        Text("Gender").font(.caption)
+                        Picker("Gender", selection: $tempGender) {
+                            ForEach(genderOptions, id: \.self) { option in
+                                Text(option).tag(option)
+                            }
+                        }
+                        .frame(height: 50)
+                    }
+                    
+                    // Start Button
+                    Button(action: {
+                        manager.startCalibration(age: tempAge, gender: tempGender)
+                        showDemographics = false
+                    }) {
+                        Text("Start Calibration")
+                            .bold()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                    .padding(.top)
+                    
+                    // Skip Button
+                    Button("Skip") {
+                        manager.startCalibration(age: "", gender: "Prefer not to say")
+                        showDemographics = false
+                    }
+                    .font(.caption)
+                    .foregroundColor(.gray)
+                }
+                .padding()
+            }
         }
         // When the view is first displayed.
         .onAppear { // Modifier called when the view appears.
