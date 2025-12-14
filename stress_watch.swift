@@ -264,7 +264,7 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
 
     // MARK: - HealthKit Integration
     
-    private func requestHealthKitAuthorization() { // Function to request HealthKit authorization.
+    func requestHealthKitAuthorization() { // Function to request HealthKit authorization.
         healthKitManager.requestAuthorization { [weak self] success, error in // Calls the manager's request method.
             guard let self = self else { return } // Safely unwraps self.
             if success { // Checks if authorization was successful.
@@ -281,7 +281,7 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
     private func startDataStream() { // Function to start the data fetching timer.
         dataFetchTimer?.invalidate() // Invalidates any existing data fetch timer.
         // Schedule new timer
-        dataFetchTimer = Timer.scheduledTimer(withInterval: 0.5, repeats: true) { [weak self] _ in // Schedules a new timer to fire every 0.5 seconds.
+        dataFetchTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in // Schedules a new timer to fire every 0.5 seconds.
             self?.fetchLiveHRVData() // Calls the function to fetch live HRV data.
         }
         dataFetchTimer?.fire() // Fires the timer immediately.
@@ -364,15 +364,15 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
     
     private func startPacer() { // Function to manage the pacer animation phases.
         // Define the phases of the 4-7-8 breathing technique (Duration, Scale, Color, Haptic Type).
-        let phases: [(PacerPhase, Double, CGFloat, Color, WKHapticType)] = [ // Array of tuples defining each phase.
+        let phases: [(PacerPhase, Double, CGFloat, Color, WKHapticType?)] = [ // Array of tuples defining each phase.
             // 4 seconds IN (Grow) - Gentle haptic at the start
             (.inhale, 4.0, 1.5, Color.green, .start), // Inhale phase definition.
             // 7 seconds HOLD (Large) - No haptic
-            (.hold,   7.0, 1.5, Color.yellow, .none), // Hold phase definition.
+            (.hold,   7.0, 1.5, Color.yellow, nil), // Hold phase definition.
             // 8 seconds OUT (Shrink) - Gentle haptic at the start
             (.exhale, 8.0, 1.0, Color.blue, .start), // Exhale phase definition.
             // 1 second PAUSE (Small) - No haptic
-            (.pause,  1.0, 1.0, Color.purple.opacity(0.6), .none) // Pause phase definition.
+            (.pause,  1.0, 1.0, Color.purple.opacity(0.6), nil) // Pause phase definition.
         ]
         
         var totalElapsed: Double = 0 // Variable to track elapsed time in the cycle.
@@ -389,8 +389,8 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
             let hapticType = currentPhase.4 // Gets the haptic type for the current phase.
             
             // Trigger haptic at the start of a new phase (Inhale/Exhale)
-            if totalElapsed == 0.0 && hapticType != .none { // Checks if it's the start of the phase and haptic is required.
-                WKInterfaceDevice.current().play(hapticType) // Plays the haptic.
+            if totalElapsed == 0.0, let haptic = hapticType { // Checks if it's the start of the phase and haptic is required.
+                WKInterfaceDevice.current().play(haptic) // Plays the haptic.
             }
             
             withAnimation(.easeInOut(duration: duration)) { // Animate the changes.
