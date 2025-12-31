@@ -4,7 +4,11 @@ import HealthKit // Imports the HealthKit framework for accessing health data li
 import Combine // Imports the Combine framework for handling asynchronous events and data streams.
 import WatchKit // Imports the WatchKit framework, required for watchOS-specific features like haptics.
 
-// MARK: - 1. HealthKit & Manager Logic (Adapted for Watch)
+// ============================================================================
+// MARK: - LOGIC
+// ============================================================================
+
+// MARK: 1. HealthKit Manager
 
 /**
  * HealthKitManager: Handles all direct interaction with the Apple HealthKit framework.
@@ -14,15 +18,15 @@ class HealthKitManager { // Defines the HealthKitManager class to manage HealthK
     // --------------------------------------------------------------------------------
     // HealthKit Setup
     // --------------------------------------------------------------------------------
-    private let healthStore = HKHealthStore() // Creates an instance of HKHealthStore to access the HealthKit database.
+    private lazy var healthStore = HKHealthStore() // Lazy to avoid crash in Previews
     // Defines the specific health data type we are interested in: Heart Rate Variability (SDNN)
-    private let hrvType = HKQuantityType.quantityType(forIdentifier: .heartRateVariabilitySDNN)! // Identifies the HRV (SDNN) quantity type.
+    private let hrvType = HKQuantityType.quantityType(forIdentifier: .heartRateVariabilitySDNN) // Removed force unwrap for safety.
     
     /**
      * Request Authorization: Prompts the user for permission to read HRV data.
      */
     func requestAuthorization(completion: @escaping (Bool, Error?) -> Void) { // Function to request HealthKit authorization with a completion handler.
-        guard HKHealthStore.isHealthDataAvailable() else { // Checks if HealthKit data is available on the device.
+        guard let hrvType = hrvType, HKHealthStore.isHealthDataAvailable() else { // Checks if HealthKit data is available on the device.
             completion(false, NSError(domain: "HealthKitError", code: 100, userInfo: [NSLocalizedDescriptionKey: "Health data is not available."])) // Returns an error if HealthKit is not available.
             return // Exits the function.
         }
@@ -39,8 +43,12 @@ class HealthKitManager { // Defines the HealthKitManager class to manage HealthK
      * Fetch Latest HRV Reading: Reads the single most recent HRV data point.
      */
     func fetchLatestHRV(completion: @escaping (Double?, Error?) -> Void) { // Function to fetch the latest HRV reading.
+        guard let hrvType = hrvType else {
+            completion(nil, nil)
+            return
+        }
         let now = Date() // Gets the current date and time.
-        let oneDayAgo = Calendar.current.date(byAdding: .day, value: -1, to: now)! // Calculates the date and time for 24 hours ago.
+        let oneDayAgo = Calendar.current.date(byAdding: .day, value: -1, to: now) ?? now // Safer date calculation.
         let predicate = HKQuery.predicateForSamples(withStart: oneDayAgo, end: now, options: .strictEndDate) // Creates a predicate to query samples within the last 24 hours.
         let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false) // Creates a sort descriptor to sort samples by end date in descending order.
         
@@ -69,6 +77,10 @@ class HealthKitManager { // Defines the HealthKitManager class to manage HealthK
      * Used during calibration to capture HRV when the user reports stress.
      */
     func fetchHRV(at date: Date, completion: @escaping (Double?, Error?) -> Void) {
+        guard let hrvType = hrvType else {
+            completion(nil, nil)
+            return
+        }
         let start = date.addingTimeInterval(-900) // 15 minutes before the reported time.
         let end = date.addingTimeInterval(900)   // 15 minutes after the reported time.
         
@@ -94,7 +106,7 @@ class HealthKitManager { // Defines the HealthKitManager class to manage HealthK
     }
 }
 
-// MARK: - 2. Application Logic and State Management
+// MARK: 2. App Logic (ViewModel)
 
 /**
  * PacerPhase: Enum to define the states of the breathing animation.
@@ -115,7 +127,9 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
     // --- Constants ---
     private let THRESHOLD: Double = 50.0 // Constant defining the HRV threshold for stress detection.
     private let SESSION_DURATION = 60 // Constant defining the duration of a breathing session in seconds.
-    private let healthKitManager = HealthKitManager() // Instance of HealthKitManager to handle HealthKit operations.
+    
+    // Lazy initialization to prevent crashes in Previews
+    private lazy var healthKitManager: HealthKitManager = HealthKitManager()
     
     // --- Published Properties (These update the SwiftUI View) ---
     @Published var hrvValue: Double? = nil // Published property for the current HRV value, optional.
@@ -125,7 +139,7 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
     @Published var sessionTimeLeft: Int = 0 // Published property for the remaining time in the breathing session.
     @Published var messageBoxContent: String? = nil // Published property for messages to display (e.g., session results).
     
-    // Pacer Animation State 
+    // Pacer Animation State
     @Published var pacerPhase: PacerPhase = .pause // Published property for the current phase of the pacer.
     @Published var pacerScale: CGFloat = 1.0 // Published property for the scale of the pacer animation.
     @Published var pacerColor: Color = Color.purple.opacity(0.6) // Published property for the color of the pacer animation.
@@ -138,9 +152,13 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
     private var isAuthorized = false // Boolean to track if HealthKit authorization has been granted.
 
     init() { // Initializer for the class.
-        loadCalibrationData()
-        checkCalibrationStatus()
-        requestHealthKitAuthorization() // Requests HealthKit authorization upon initialization.
+        // NUCLEAR PREVIEW SAFETY: Do absolutely nothing if we are in a preview.
+        // This is the only way to guarantee the preview won't crash due to background logic.
+        if ProcessInfo.processInfo.environment["XCODE_RUNNING_FOR_PREVIEWS"] != "1" {
+            loadCalibrationData()
+            checkCalibrationStatus()
+            requestHealthKitAuthorization()
+        }
     }
     
     // --- Calibration State ---
@@ -259,7 +277,9 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
      */
     private func triggerHapticNotification() { // Function to trigger a haptic notification.
         // Use a simple notification haptic to alert the user on the wrist.
+        #if os(watchOS)
         WKInterfaceDevice.current().play(.notification) // Plays a notification haptic on the Apple Watch.
+        #endif
     }
 
     // MARK: - HealthKit Integration
@@ -269,22 +289,33 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
             guard let self = self else { return } // Safely unwraps self.
             if success { // Checks if authorization was successful.
                 self.isAuthorized = true // Sets the authorized flag to true.
-                self.statusText = "Authorized. Fetching data..." // Updates the status text.
-                self.startDataStream() // Starts fetching data.
+                self.statusText = "Ready" // Updated status text.
+                // Automatic streaming disabled for performance on older hardware.
+                // self.startDataStream() 
             } else { // If authorization failed.
-                self.statusText = "Denied. Check Settings." // Updates status text to inform the user.
-                print("Authorization Error: \(error?.localizedDescription ?? "Unknown")") // Prints the error to the console.
+                self.statusText = "Denied" // Updates status text.
+                print("Authorization Error: \(error?.localizedDescription ?? "Unknown")") // Prints the error.
             }
         }
     }
     
     private func startDataStream() { // Function to start the data fetching timer.
         dataFetchTimer?.invalidate() // Invalidates any existing data fetch timer.
-        // Schedule new timer
-        dataFetchTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in // Schedules a new timer to fire every 0.5 seconds.
+        // Schedule new timer - reduced frequency to 10 seconds for performance
+        dataFetchTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in // Schedules a new timer to fire every 10 seconds.
             self?.fetchLiveHRVData() // Calls the function to fetch live HRV data.
         }
         dataFetchTimer?.fire() // Fires the timer immediately.
+    }
+    
+    /**
+     * Manual Refresh: Allows the user to manually trigger an HRV fetch.
+     * This saves significant CPU/Battery on older hardware.
+     */
+    func refreshData() {
+        guard isAuthorized && !isIntervening else { return }
+        statusText = "Refreshing..."
+        fetchLiveHRVData()
     }
     
     private func fetchLiveHRVData() { // Function to fetch the latest HRV data.
@@ -295,11 +326,12 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
             if let hrv = hrv { // Checks if an HRV value was returned.
                 self.hrvValue = hrv // Updates the HRV value property.
                 self.updateDetectionStatus() // Updates the stress detection status based on the new value.
+                if self.statusText == "Refreshing..." { self.statusText = "Updated" }
             } else if error != nil { // Checks if an error occurred.
                 self.hrvValue = nil // Sets the HRV value to nil.
                 self.statusText = "Data Error" // Updates the status text to indicate an error.
             } else { // If no data and no error (e.g., no samples yet).
-                self.statusText = "Awaiting HRV Data..." // Updates status text to indicate waiting.
+                self.statusText = "No Data Found" // Updated status text.
             }
         }
     }
@@ -390,7 +422,9 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
             
             // Trigger haptic at the start of a new phase (Inhale/Exhale)
             if totalElapsed == 0.0, let haptic = hapticType { // Checks if it's the start of the phase and haptic is required.
+                #if os(watchOS)
                 WKInterfaceDevice.current().play(haptic) // Plays the haptic.
+                #endif
             }
             
             withAnimation(.easeInOut(duration: duration)) { // Animate the changes.
@@ -418,7 +452,9 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
         pacerColor = Color.purple.opacity(0.6) // Resets pacer color.
         
         // Trigger a success haptic to indicate session completion
+        #if os(watchOS)
         WKInterfaceDevice.current().play(.success) // Plays a success haptic.
+        #endif
         
         startDataStream() // Restarts the data stream.
         
@@ -438,12 +474,14 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
     }
 }
 
-// MARK: - 3. SwiftUI Views (Watch UI Structure)
+// ============================================================================
+// MARK: - SCREEN (ContentView)
+// ============================================================================
 
 /**
- * StressNotOnMyWatchView: The simplified SwiftUI view for Apple Watch.
+ * ContentView: The simplified SwiftUI view for Apple Watch.
  */
-struct StressNotOnMyWatchView: View { // Defines the main SwiftUI view for the watch app.
+struct ContentView: View { // Defines the main SwiftUI view for the watch app.
     
     @StateObject var manager = StressNotOnMyWatchManager() // Creates a state object for the manager.
     
@@ -454,10 +492,8 @@ struct StressNotOnMyWatchView: View { // Defines the main SwiftUI view for the w
     let genderOptions = ["Male", "Female", "Non-binary", "Other", "Prefer not to say"] // Options for gender picker.
     
     var body: some View { // Defines the body of the view.
-        // Use a ScrollView as the main container for adaptability on small screens.
-        ScrollView { // Wraps content in a ScrollView.
+        ScrollView {
             VStack(spacing: 8) {
-                
                 // MARK: App Title
                 Text("Stress? Not on my Watch!")
                     .font(.headline)
@@ -468,145 +504,98 @@ struct StressNotOnMyWatchView: View { // Defines the main SwiftUI view for the w
                 statusPill // Displays the status pill view.
                 
                 // MARK: Calibration UI
-                // Only visible when calibration mode is active.
                 if manager.isCalibrating {
                     VStack(spacing: 5) {
                         Text("CALIBRATION MODE")
-                            .font(.caption2)
-                            .fontWeight(.bold)
-                            .foregroundColor(.orange)
-                        Text("Day \(manager.calibrationDay)/7") // Shows progress.
-                            .font(.caption2)
-                            .foregroundColor(.gray)
+                            .font(.caption2).fontWeight(.bold).foregroundColor(.orange)
+                        Text("Day \(manager.calibrationDay)/7")
+                            .font(.caption2).foregroundColor(.gray)
                         
-                        // Button to report stress events.
                         Button(action: manager.reportStress) {
-                            Text("I FEEL STRESSED")
-                                .font(.headline)
-                                .foregroundColor(.black)
-                                .padding(.vertical, 5)
+                            Text("I FEEL STRESSED").font(.headline).foregroundColor(.black)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.orange)
-                        .padding(.top, 5)
+                        .buttonStyle(.borderedProminent).tint(.orange)
                     }
-                    .padding()
-                    .background(Color.orange.opacity(0.1))
-                    .cornerRadius(10)
+                    .padding().background(Color.orange.opacity(0.1)).cornerRadius(10)
                 }
                 
                 // MARK: Pacer or HRV Display
-                if manager.isIntervening { // Checks if a session is active.
-                    // Pacer View during Intervention
-                    pacerView // Displays the pacer view.
-                    
-                    // Countdown
-                    Text("\(manager.sessionTimeLeft)s") // Displays the remaining time.
-                        .font(.title3).bold().monospaced() // Sets the font style.
-                        .foregroundColor(.purple) // Sets the text color.
-                } else { // If not intervening.
-                    // HRV Value when monitoring
-                    VStack(spacing: 2) { // Vertical stack for HRV display.
-                        Text(manager.hrvValue == nil ? "--" : String(format: "%.0f", manager.hrvValue!)) // Displays HRV value or placeholder.
-                            .font(.system(size: 40, weight: .heavy, design: .rounded)) // Sets a large font.
-                            .foregroundColor(manager.isStressed ? .red : .green) // Sets color based on stress status.
-                        Text("HRV (ms)").font(.caption2).foregroundColor(.gray) // Displays the unit label.
+                if manager.isIntervening {
+                    pacerView
+                    Text("\(manager.sessionTimeLeft)s").font(.title3).bold().monospaced().foregroundColor(.purple)
+                } else {
+                    VStack(spacing: 2) {
+                        Text(manager.hrvValue == nil ? "--" : String(format: "%.0f", manager.hrvValue!))
+                            .font(.system(size: 40, weight: .heavy, design: .rounded))
+                            .foregroundColor(manager.isStressed ? .red : .green)
+                        
+                        HStack(spacing: 4) {
+                            Text("HRV (ms)").font(.caption2).foregroundColor(.gray)
+                            
+                            // Manual Refresh Button
+                            Button(action: manager.refreshData) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 10, weight: .bold))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(.blue)
+                        }
                     }
                 }
                 
                 // MARK: Action Button
-                // The button spans the width of the screen on Watch.
-                Button(action: manager.startStressNotOnMyWatchSession) { // Button to start the session.
-                    Text(manager.isIntervening ? "Session Running" : "START BREATHING") // Sets button text based on state.
-                        .font(.headline) // Sets font.
-                        .padding(.vertical, 5) // Adds vertical padding.
+                Button(action: manager.startStressNotOnMyWatchSession) {
+                    Text(manager.isIntervening ? "Session Running" : "START BREATHING")
+                        .font(.headline).padding(.vertical, 5)
                 }
-                .buttonStyle(.borderedProminent) // Sets the button style.
-                .tint(manager.isStressed ? .purple : .gray) // Sets the tint color based on stress.
-                .disabled(!manager.isStressed || manager.isIntervening) // Disables button if not stressed or already running.
+                .buttonStyle(.borderedProminent)
+                .tint(manager.isStressed ? .purple : .gray)
+                .disabled(!manager.isStressed || manager.isIntervening)
                 
                 // MARK: Message Box (Efficacy Result)
-                if let message = manager.messageBoxContent { // Checks if there is a message to display.
-                    // Smaller font for efficacy results on Watch.
-                    Text(message) // Displays the message.
-                        .font(.caption2) // Sets the font.
-                        .padding(5) // Adds padding.
-                        .frame(maxWidth: .infinity) // Makes it fill the width.
-                        .background(Color.green.opacity(0.2)) // Sets background color.
-                        .foregroundColor(.green) // Sets text color.
-                        .cornerRadius(8) // Rounds the corners.
+                if let message = manager.messageBoxContent {
+                    Text(message).font(.caption2).padding(5).frame(maxWidth: .infinity)
+                        .background(Color.green.opacity(0.2)).foregroundColor(.green).cornerRadius(8)
                 }
                 
-                // MARK: Start Calibration Button (Hidden if calibrating)
+                // MARK: Start Calibration Button
                 if !manager.isCalibrating {
-                    Button("Start Calibration") {
-                        // Show the demographic survey instead of starting immediately.
-                        showDemographics = true
-                    }
-                    .font(.caption2)
-                    .padding(.top, 10)
+                    Button("Start Calibration") { showDemographics = true }
+                        .font(.caption2).padding(.top, 10)
                 }
             }
-            .padding(.vertical) // Adds vertical padding to the VStack.
+            .padding(.vertical)
         }
-        // Demographic Survey Sheet
         .sheet(isPresented: $showDemographics) {
             ScrollView {
                 VStack(spacing: 10) {
-                    Text("Tell us about you")
-                        .font(.headline)
+                    Text("Tell us about you").font(.headline)
+                    Text("These fields are optional.").font(.caption2).foregroundColor(.gray)
                     
-                    Text("These fields are optional and help us tailor your experience.")
-                        .font(.caption2)
-                        .foregroundColor(.gray)
-                        .multilineTextAlignment(.center)
-                    
-                    // Age Input
                     VStack(alignment: .leading) {
                         Text("Age").font(.caption)
                         TextField("Optional", text: $tempAge)
-                        #if os(iOS)
-                            .keyboardType(.numberPad)
-                        #endif
                     }
                     
-                    // Gender Picker
                     VStack(alignment: .leading) {
                         Text("Gender").font(.caption)
                         Picker("Gender", selection: $tempGender) {
-                            ForEach(genderOptions, id: \.self) { option in
-                                Text(option).tag(option)
-                            }
-                        }
-                        .frame(height: 50)
+                            ForEach(genderOptions, id: \.self) { Text($0).tag($0) }
+                        }.frame(height: 50)
                     }
                     
-                    // Start Button
                     Button(action: {
                         manager.startCalibration(age: tempAge, gender: tempGender)
                         showDemographics = false
                     }) {
-                        Text("Start Calibration")
-                            .bold()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.green)
-                    .padding(.top)
-                    
-                    // Skip Button
-                    Button("Skip") {
-                        manager.startCalibration(age: "", gender: "Prefer not to say")
-                        showDemographics = false
-                    }
-                    .font(.caption)
-                    .foregroundColor(.gray)
+                        Text("Start Calibration").bold()
+                    }.buttonStyle(.borderedProminent).tint(.green).padding(.top)
                 }
                 .padding()
             }
         }
-        // When the view is first displayed.
-        .onAppear { // Modifier called when the view appears.
-            manager.requestHealthKitAuthorization() // Requests authorization.
+        .onAppear {
+            // No longer calling requestHealthKitAuthorization here as it's handled in Manager.init
         }
     }
     
@@ -655,14 +644,20 @@ struct StressNotOnMyWatchView: View { // Defines the main SwiftUI view for the w
     }
 }
 
-// MARK: - 4. App Entry Point for WatchOS
+// ============================================================================
+// MARK: - APP ENTRY POINT
+// ============================================================================
 
 @main // Attribute to designate the entry point of the app.
 struct StressNotOnMyWatchApp: App { // Defines the main app structure.
     // The main entry point for the watchOS application.
     var body: some Scene { // Defines the body of the app.
         WindowGroup { // Creates a window group.
-            StressNotOnMyWatchView() // Sets the root view.
+            ContentView() // Sets the root view.
         }
     }
+}
+
+#Preview {
+    ContentView()
 }
