@@ -13,5 +13,5 @@ To test:
 6. The iPhone and watch should ask you if you want to trust the computer. Click trust.
 7. On the iPhone go to Settings - Privacy and Security and scroll down to the bottom. You should see developer mode click on it and turn it on (this will probably restart the iPhone).
 8. Turn Developer Mode on for the watch as well: Settings - Privacy and Security and scroll down (this will probably restart the watch).
-9. Look at the play button. Move your gaze across to the right until you see where you can choose your simulator. Choose your watch(you can also go to the top bar. Then look for Product - Destination and choose a your watch).
-10. 
+9. Look at the play button. Move your gaze across to the right until you see where you can choose your simulator. Choose your watch (you can also go to the top bar. Then look for Product - Destination and choose a your watch).
+10. In the Project Navigator in Xcode click the blue project icon next to your project name 
