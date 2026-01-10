@@ -1,4 +1,4 @@
-// TODO: code ready for testing. need to use Xcode to test
+// TODO: suspicious stuff: i think the app still is checking for  hrv data on app instead of hr
 import SwiftUI // Imports the SwiftUI framework for building the user interface.
 import HealthKit // Imports the HealthKit framework for accessing health data like HRV.
 import Combine // Imports the Combine framework for handling asynchronous events and data streams.
@@ -57,87 +57,19 @@ class HealthKitManager: NSObject { // Defines the HealthKitManager class to mana
         let shareSet = Set(shareList)
         
         healthStore.requestAuthorization(toShare: shareSet, read: typesToRead) { success, error in 
-            if success {
-                print("AUTH: HealthKit Authorization Success")
-            } else {
-                print("AUTH: HealthKit Authorization FAILED: \(error?.localizedDescription ?? "null")")
-            }
             DispatchQueue.main.async { 
                 completion(success, error) 
             }
         }
     }
     
-    /**
-     * Fetch Latest HRV Reading: Reads the single most recent HRV data point.
-     */
-    func fetchLatestHRV(completion: @escaping (Double?, Error?) -> Void) { 
-        print("ACTION: HealthKitManager.fetchLatestHRV started")
-        guard let hrvType = hrvType else {
-            completion(nil, nil)
-            return
-        }
-        let now = Date() 
-        let start = Calendar.current.date(byAdding: .hour, value: -24, to: now) ?? now 
-        let predicate = HKQuery.predicateForSamples(withStart: start, end: now, options: .strictEndDate) 
-        let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false) 
-        
-        let query = HKSampleQuery(sampleType: hrvType, predicate: predicate, limit: 1, sortDescriptors: [sortDescriptor]) { 
-            (_, samples, error) in 
-            print("DIAG: HealthKit query returned \(samples?.count ?? 0) samples")
-            
-            DispatchQueue.main.async { 
-                guard let sample = samples?.first as? HKQuantitySample, error == nil else { 
-                    print("ACTION: HealthKitManager.fetchLatestHRV COMPLETED (No samples or error)")
-                    completion(nil, error)
-                    return
-                }
-                let hrvInMS = sample.quantity.doubleValue(for: HKUnit.secondUnit(with: .milli))
-                print("ACTION: HealthKitManager.fetchLatestHRV COMPLETED (Value: \(hrvInMS))")
-                completion(hrvInMS, nil)
-            }
-        }
-        healthStore.execute(query) 
-    }
-    
-    /**
-     * Fetch HRV at a specific time: Reads HRV data around a specific timestamp.
-     * Used during calibration to capture HRV when the user reports stress.
-     */
-    func fetchHRV(at date: Date, completion: @escaping (Double?, Error?) -> Void) {
-        print("ACTION: HealthKitManager.fetchHRV(at:) started")
-        guard let hrvType = hrvType else {
-            completion(nil, nil)
-            return
-        }
-        let start = Calendar.current.date(byAdding: .hour, value: -24, to: date) ?? date
-        let end = date.addingTimeInterval(60)    // 1 minute after
-        
-        let predicate = HKQuery.predicateForSamples(withStart: start, end: end, options: .strictEndDate)
-        let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
-        
-        let query = HKSampleQuery(sampleType: hrvType, predicate: predicate, limit: 1, sortDescriptors: [sortDescriptor]) {
-            (_, samples, error) in
-            
-            DispatchQueue.main.async {
-                guard let sample = samples?.first as? HKQuantitySample, error == nil else {
-                    print("ACTION: HealthKitManager.fetchHRV(at:) COMPLETED (No samples or error)")
-                    completion(nil, error)
-                    return
-                }
-                let hrvInMS = sample.quantity.doubleValue(for: HKUnit.secondUnit(with: .milli))
-                print("ACTION: HealthKitManager.fetchHRV(at:) COMPLETED (Value: \(hrvInMS))")
-                completion(hrvInMS, nil)
-            }
-        }
-        healthStore.execute(query)
-    }
+
+
     
     /**
      * Diagnostic Control Fetch: Tries to fetch Heart Rate to see if HealthKit is working at all.
      */
     func fetchControlHeartRate(completion: @escaping (Double?, Error?) -> Void) {
-        print("ACTION: HealthKitManager.fetchControlHeartRate started")
         guard let heartRateType = heartRateType else {
             completion(nil, nil)
             return
@@ -150,55 +82,30 @@ class HealthKitManager: NSObject { // Defines the HealthKitManager class to mana
             (_, samples, error) in
             DispatchQueue.main.async {
                 if let error = error {
-                    print("ACTION: HealthKitManager.fetchControlHeartRate FAILED: \(error.localizedDescription)")
                     completion(nil, error)
                     return
                 }
                 guard let sample = samples?.first as? HKQuantitySample else {
-                    print("ACTION: HealthKitManager.fetchControlHeartRate COMPLETED (No samples)")
                     completion(nil, nil)
                     return
                 }
                 let bpm = sample.quantity.doubleValue(for: HKUnit(from: "count/min"))
-                print("ACTION: HealthKitManager.fetchControlHeartRate COMPLETED (Value: \(bpm))")
                 completion(bpm, nil)
             }
         }
         healthStore.execute(query)
     }
     
-    /**
-     * Deep Diagnostic: Fetches the absolute last HRV sample regardless of date.
-     */
-    func fetchAbsoluteLastHRV(completion: @escaping (Double?, Date?, Error?) -> Void) {
-        print("ACTION: HealthKitManager.fetchAbsoluteLastHRV started")
-        guard let hrvType = hrvType else { return }
-        let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
-        let query = HKSampleQuery(sampleType: hrvType, predicate: nil, limit: 1, sortDescriptors: [sortDescriptor]) { (_, samples, error) in
-            DispatchQueue.main.async {
-                if let sample = samples?.first as? HKQuantitySample {
-                    let val = sample.quantity.doubleValue(for: HKUnit.secondUnit(with: .milli))
-                    print("DIAG: Deep Check found sample from \(sample.endDate): \(val)ms")
-                    completion(val, sample.endDate, nil)
-                } else {
-                    print("DIAG: Deep Check found NOTHING in entire history.")
-                    completion(nil, nil, error)
-                }
-            }
-        }
-        healthStore.execute(query)
-    }
+
     
     /**
      * Manual HRV Calculation: Fetches raw heartbeats and calculates SDNN.
      * Used for users under 18 where system HRV is restricted.
      */
     func fetchManualHRV(completion: @escaping (Double?, Int, Date?, Error?, Double?) -> Void) {
-        print("ACTION: HealthKitManager.fetchManualHRV started")
-        
         let now = Date()
-        let windowScale = now.addingTimeInterval(-86400) // 24 hours for V12 to see if ANY exists
-        let predicate = HKQuery.predicateForSamples(withStart: windowScale, end: now, options: [])
+        let windowScale = now.addingTimeInterval(-900) // 15 minutes window: Strict recency to force polling if data is missing
+        let predicate = HKQuery.predicateForSamples(withStart: windowScale, end: nil, options: [])
         
         let seriesType = HKSeriesType.heartbeat()
         let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
@@ -206,15 +113,9 @@ class HealthKitManager: NSObject { // Defines the HealthKitManager class to mana
         let query = HKSampleQuery(sampleType: seriesType, predicate: predicate, limit: 10, sortDescriptors: [sortDescriptor]) { [weak self] (_, samples, error) in
             guard let self = self else { return }
             
-            let count = samples?.count ?? 0
-            print("DIAG: V12 Found \(count) heartbeat series samples in last 24h")
-            
             if let series = samples?.first as? HKHeartbeatSeriesSample {
-                let seriesDate = series.endDate
-                print("DIAG: Found Heartbeat Series from \(seriesDate)")
                 self.fetchHeartbeats(from: series, completion: completion)
             } else {
-                print("ACTION: HealthKitManager.fetchManualHRV - No series found (\(count) total). Checking BPM...")
                 self.fetchControlHeartRate { bpm, hrError in
                     if let bpm = bpm {
                         completion(nil, -1, Date(), nil, bpm) 
@@ -309,9 +210,11 @@ class HealthKitManager: NSObject { // Defines the HealthKitManager class to mana
     // MARK: - Measurement Session (Forcing Beat-to-Beat Data)
     
     func startMeasurementSession() {
-        print("ACTION: HealthKitManager.startMeasurementSession started")
+        // V12.2: Check Auth Status
+        let authStatus = healthStore.authorizationStatus(for: HKSeriesType.heartbeat())
+
         let configuration = HKWorkoutConfiguration()
-        configuration.activityType = .yoga // Yoga is the most consistent for forcing beat-to-beat
+        configuration.activityType = .yoga // Yoga is consistent for forcing beat-to-beat data
         configuration.locationType = .indoor
         
         do {
@@ -328,24 +231,17 @@ class HealthKitManager: NSObject { // Defines the HealthKitManager class to mana
             let startDate = Date()
             currentSession?.startActivity(with: startDate)
             currentBuilder?.beginCollection(withStart: startDate) { success, error in
-                if success {
-                    print("DIAG: Workout builder collection started at \(startDate)")
-                } else {
-                    print("DIAG: Workout builder FAILED: \(error?.localizedDescription ?? "null")")
-                }
+                // Handled silently
             }
         } catch {
-            print("DIAG: Session initialization FAILED: \(error.localizedDescription)")
+            // Handled silently
         }
     }
     
     // Delegates removed for stability
     
     func stopMeasurementSession(completion: @escaping (Bool) -> Void) {
-        print("ACTION: HealthKitManager.stopMeasurementSession started")
-        
         guard let session = currentSession, let builder = currentBuilder else {
-            print("DIAG: No active session/builder to stop")
             completion(false)
             return
         }
@@ -354,13 +250,11 @@ class HealthKitManager: NSObject { // Defines the HealthKitManager class to mana
         builder.endCollection(withEnd: Date()) { (success, error) in
             if success {
                 builder.finishWorkout { (workout, error) in
-                    print("DIAG: Workout finished and saved (\(workout != nil)). Session State: \(session.state.rawValue)")
                     DispatchQueue.main.async {
                         completion(workout != nil)
                     }
                 }
             } else {
-                print("DIAG: endCollection failed: \(error?.localizedDescription ?? "null")")
                 DispatchQueue.main.async {
                     completion(false)
                 }
@@ -430,13 +324,11 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
     }
     
     func startup() {
-        print("ACTION: StressNotOnMyWatchManager.startup started")
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.loadCalibrationData()
             
             // USER REQUEST: Reset baseline data every time the app runs
-            print("ACTION: Resetting HRV readings and calibration timer for a fresh session")
             self.stressedReadings = []
             self.calmReadings = []
             self.customThreshold = nil
@@ -447,13 +339,13 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
             self.saveCalibrationData() // Persist the reset
             self.checkCalibrationStatus()
             self.requestHealthKitAuthorization()
-            print("ACTION: StressNotOnMyWatchManager.startup complete (isCalibrating: \(self.isCalibrating))")
         }
     }
     
     // --- Calibration State ---
     @Published var isCalibrating: Bool = false // Tracks if the app is in the 1-day calibration mode.
     @Published var calibrationHour: Int = 0 // Tracks the current hour of the calibration (1-24).
+    @Published var measurementCount: Int = 0 // Number of successful HRV measurements taken during calibration.
     private var calibrationStartDate: Date? // Stores the start date of the calibration period.
     private var stressedReadings: [Double] = [] // Stores HRV readings when user says "Yes, Stressed".
     private var calmReadings: [Double] = [] // Stores HRV readings when user says "No, Calm".
@@ -509,6 +401,34 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
     }
     
     /**
+     * Reset Calibration: Clears all calibration data and restarts the process.
+     */
+    func resetCalibration() {
+        print("ACTION: StressNotOnMyWatchManager.resetCalibration started")
+        isCalibrating = true
+        calibrationStartDate = Date()
+        stressedReadings = []
+        calmReadings = []
+        customThreshold = nil
+        measurementCount = 0
+        userAge = "" // Clear demographics as well
+        userGender = "Prefer not to say"
+        saveCalibrationData()
+        checkCalibrationStatus()
+        // Optionally, update UI status
+        statusText = "Calibration Reset"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            self.statusText = "Hourly Check"
+        }
+    }
+
+    // Public method used by the UI button
+    func resetBaseline() {
+        print("ACTION: StressNotOnMyWatchManager.resetBaseline called")
+        resetCalibration()
+    }
+    
+    /**
      * Start Calibration: Initiates the 7-day calibration period.
      * Resets any previous calibration data.
      */
@@ -525,11 +445,14 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
     }
     
     /**
-     * Start "Stay Still" Session: 1 minute of forced heartbeat recording.
+     * Start "Stay Still" Session: 90 seconds of forced heartbeat recording.
      */
     func startStayStillSession() {
         print("ACTION: StressNotOnMyWatchManager.startStayStillSession started")
         guard !isMeasuring else { return }
+        
+        // Safety: Invalidate any old timer
+        sessionTimer?.invalidate()
         
         isMeasuring = true
         measurementCountdown = 60.0
@@ -541,7 +464,7 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
         let totalDuration: Double = 60.0
         
         // Use a faster timer (0.1s) for smooth UI and better accuracy
-        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
+        sessionTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
             guard let self = self else {
                 timer.invalidate()
                 return
@@ -570,9 +493,10 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
                 guard let self = self else { return }
                 print("DIAG: stopMeasurementSession completion - success: \(success)")
                 
-                // Wait another short moment post-stop before fetching
+                // Wait another short moment post-stop before fetching. 
+                // Start with a very high retry count (e.g., 30 * 2s = 60s) to persistently wait for data.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    self.fetchAndDisplayResults(retryCount: 3) // More retries
+                    self.fetchAndDisplayResults(retryCount: 30) 
                 }
             }
         }
@@ -590,18 +514,21 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
                 if let hrv = hrv {
                     self.lastMeasuredHRV = hrv
                     self.hrvValue = hrv
-                    self.isMeasuring = false 
-                    
-                    if !self.isCalibrating {
+                    self.isMeasuring = false
+                    if self.isCalibrating {
+                        // Increment measurement count for calibration tracking
+                        self.measurementCount += 1
+                        // Check if calibration can end
+                        self.checkCalibrationStatus()
+                    } else {
                         self.updateDetectionStatus()
                     }
-                    
                     self.showStressQuestionnaire = true
                     self.statusText = self.isCalibrating ? "Reporting..." : "Done"
-                    print("ACTION: HRV Measurement COMPLETED (Value: \(hrv)ms, Beats: \(beats), isCalibrating: \(self.isCalibrating))")
+                    print("ACTION: HRV Measurement COMPLETED (Value: \(hrv)ms, Beats: \(beats), isCalibrating: \(self.isCalibrating), measurementCount: \(self.measurementCount))")
                 } else if retryCount > 0 {
-                    // Retry once after a short delay
-                    print("DIAG: No HRV found, retrying in 2 seconds...")
+                    // Retry with a delay. Update status so user knows we are waiting.
+                    self.statusText = "Analyzing (\(retryCount))..."
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
                         self.fetchAndDisplayResults(retryCount: retryCount - 1)
                     }
@@ -672,7 +599,10 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
         let hoursElapsed = Int(Date().timeIntervalSince(startDate) / 3600)
         calibrationHour = hoursElapsed + 1
         
-        if hoursElapsed >= 24 {
+        // End calibration only when both conditions are met:
+        //   • At least six successful measurements have been recorded
+        //   • At least one hour has elapsed since calibration started
+        if measurementCount >= 6 && hoursElapsed >= 1 {
             isCalibrating = false
             // Calculate threshold: Average of stressed readings.
             if !stressedReadings.isEmpty {
@@ -682,10 +612,10 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
                 let avgCalm = calmReadings.reduce(0, +) / Double(calmReadings.count)
                 customThreshold = avgCalm * 0.8
             }
-            print("ACTION: Calibration period ended. Threshold calculated: \(customThreshold ?? 0)")
+            print("ACTION: Calibration period ended (measurements: \(measurementCount), hours: \(hoursElapsed)). Threshold calculated: \(customThreshold ?? 0)")
             saveCalibrationData()
         } else {
-            print("DIAG: Calibration check - hours elapsed: \(hoursElapsed)/24")
+            print("DIAG: Calibration ongoing – measurements: \(measurementCount), hours elapsed: \(hoursElapsed)")
         }
     }
     
@@ -821,7 +751,7 @@ struct ContentView: View { // Defines the main SwiftUI view for the watch app.
                         VStack(spacing: 10) {
                             Text("CALIBRATION MODE")
                                 .font(.caption2).fontWeight(.bold).foregroundColor(.orange)
-                            Text("Hour \(manager.calibrationHour)/24")
+                            Text("Sessions: \(manager.measurementCount)/6") // User requested session count focus
                                 .font(.caption2).foregroundColor(.gray)
                             
                             VStack(spacing: 2) {
@@ -893,16 +823,17 @@ struct ContentView: View { // Defines the main SwiftUI view for the watch app.
                             .font(.caption2).padding(.top, 10)
                     }
                     
-                    // MARK: Debug State
-                    VStack(spacing: 0) {
-                        Text("DEBUG V12: cal=\(manager.isCalibrating ? "Y" : "N") hour=\(manager.calibrationHour)").font(.system(size: 8))
-                        Text("DEBUG V12: beats=\(manager.lastValidBeats) bpm=\(manager.bpmString)").font(.system(size: 8))
-                        Text("DEBUG V12: status=\(manager.statusText)").font(.system(size: 8))
-                        if let date = manager.lastResultDate {
-                            Text("DEBUG V12: last=\(date, style: .time)").font(.system(size: 8))
-                        }
+
+                    // Reset Baseline Button
+                    Button(action: {
+                        manager.resetBaseline()
+                    }) {
+                        Text("Reset Baseline")
+                            .font(.caption2)
+                            .padding(4)
+                            .background(Color.red.opacity(0.2))
+                            .cornerRadius(4)
                     }
-                    .foregroundColor(.orange)
                     .padding(.top, 4)
                 }
                 .padding(.vertical)
@@ -934,7 +865,7 @@ struct ContentView: View { // Defines the main SwiftUI view for the watch app.
                         }
                         .frame(width: 80, height: 80)
                         
-                        Text("Measuring Heart Volume...")
+                        Text("Measuring Heart Rate...")
                             .font(.caption2)
                             .foregroundColor(.gray)
                     }
@@ -986,7 +917,7 @@ struct ContentView: View { // Defines the main SwiftUI view for the watch app.
                         }
                         
                         if manager.isCalibrating {
-                            Text("Were you feeling stressed during this minute?")
+                            Text("Were you feeling stressed during this session?")
                                 .font(.caption2)
                                 .multilineTextAlignment(.center)
                                 .padding(.horizontal)
