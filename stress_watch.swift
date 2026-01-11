@@ -69,28 +69,30 @@ class HealthKitManager: NSObject { // Defines the HealthKitManager class to mana
     /**
      * Diagnostic Control Fetch: Tries to fetch Heart Rate to see if HealthKit is working at all.
      */
-    func fetchControlHeartRate(completion: @escaping (Double?, Error?) -> Void) {
+    func fetchControlHeartRate(since: Date?, completion: @escaping (Double?, Date?, Error?) -> Void) {
         guard let heartRateType = heartRateType else {
-            completion(nil, nil)
+            completion(nil, nil, nil)
             return
         }
         let now = Date()
-        let fiveMinAgo = now.addingTimeInterval(-300)
-        let predicate = HKQuery.predicateForSamples(withStart: fiveMinAgo, end: now, options: [])
+        // Use either the provided session start time OR fall back to 24 hours ago
+        let startPoint = since ?? now.addingTimeInterval(-86400)
+        let predicate = HKQuery.predicateForSamples(withStart: startPoint, end: nil, options: [])
+        
         let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
         let query = HKSampleQuery(sampleType: heartRateType, predicate: predicate, limit: 1, sortDescriptors: [sortDescriptor]) {
             (_, samples, error) in
             DispatchQueue.main.async {
                 if let error = error {
-                    completion(nil, error)
+                    completion(nil, nil, error)
                     return
                 }
                 guard let sample = samples?.first as? HKQuantitySample else {
-                    completion(nil, nil)
+                    completion(nil, nil, nil)
                     return
                 }
                 let bpm = sample.quantity.doubleValue(for: HKUnit(from: "count/min"))
-                completion(bpm, nil)
+                completion(bpm, sample.endDate, nil)
             }
         }
         healthStore.execute(query)
@@ -102,110 +104,49 @@ class HealthKitManager: NSObject { // Defines the HealthKitManager class to mana
      * Manual HRV Calculation: Fetches raw heartbeats and calculates SDNN.
      * Used for users under 18 where system HRV is restricted.
      */
-    func fetchManualHRV(completion: @escaping (Double?, Int, Date?, Error?, Double?) -> Void) {
+    func fetchManualBPMSeries(since: Date?, statusUpdate: ((String) -> Void)? = nil, completion: @escaping (Double?, Int, Date?, Error?, Double?) -> Void) {
+        guard let hrType = heartRateType else {
+            completion(nil, 0, nil, nil, nil)
+            return
+        }
+        
         let now = Date()
-        let windowScale = now.addingTimeInterval(-900) // 15 minutes window: Strict recency to force polling if data is missing
-        let predicate = HKQuery.predicateForSamples(withStart: windowScale, end: nil, options: [])
+        let startPoint = since ?? now.addingTimeInterval(-65)
+        let predicate = HKQuery.predicateForSamples(withStart: startPoint, end: nil, options: [])
+        let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: true)
         
-        let seriesType = HKSeriesType.heartbeat()
-        let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
-        
-        let query = HKSampleQuery(sampleType: seriesType, predicate: predicate, limit: 10, sortDescriptors: [sortDescriptor]) { [weak self] (_, samples, error) in
+        let query = HKSampleQuery(sampleType: hrType, predicate: predicate, limit: 6, sortDescriptors: [sortDescriptor]) { [weak self] (_, samples, error) in
             guard let self = self else { return }
             
-            if let series = samples?.first as? HKHeartbeatSeriesSample {
-                self.fetchHeartbeats(from: series, completion: completion)
-            } else {
-                self.fetchControlHeartRate { bpm, hrError in
-                    if let bpm = bpm {
-                        completion(nil, -1, Date(), nil, bpm) 
-                    } else {
-                        completion(nil, 0, nil, error, nil)
-                    }
+            let hrSamples = samples?.compactMap { $0 as? HKQuantitySample } ?? []
+            let count = hrSamples.count
+            
+            DispatchQueue.main.async {
+                if count < 6 {
+                    completion(nil, count, nil, error, nil)
+                    return
                 }
+                
+                // Consistency: Use the same rounding logic for DB fetches
+                let intervals = hrSamples.prefix(6).map { round(60000.0 / max(1.0, $0.quantity.doubleValue(for: HKUnit(from: "count/min")))) }
+                
+                let sd = self.calculateBPM_SD(from: Array(intervals))
+                let lastBpm = hrSamples.last?.quantity.doubleValue(for: HKUnit(from: "count/min"))
+                completion(sd, count, hrSamples.last?.endDate, nil, lastBpm)
             }
         }
         healthStore.execute(query)
     }
     
-    private let collectionQueue = DispatchQueue(label: "com.healthkit.collection")
-    
-    private func fetchHeartbeats(from series: HKHeartbeatSeriesSample, completion: @escaping (Double?, Int, Date?, Error?, Double?) -> Void) {
-        let sdDate = series.endDate
-        var intervals: [TimeInterval] = []
-        
-        let heartbeatQuery = HKHeartbeatSeriesQuery(heartbeatSeries: series) { [weak self] (_, timeSinceStart, precededByGap, done, error) in
-            guard let self = self else { return }
-            
-            if let error = error {
-                completion(nil, 0, sdDate, error, nil)
-                return
-            }
-            
-            self.collectionQueue.async {
-                intervals.append(timeSinceStart)
-                
-                if done {
-                    let beatCount = intervals.count
-                    let sdnn = self.calculateSDNN(from: intervals)
-                    DispatchQueue.main.async {
-                        completion(sdnn, beatCount, sdDate, nil, nil)
-                    }
-                }
-            }
-        }
-        healthStore.execute(heartbeatQuery)
+    private func calculateBPM_SD(from intervals: [Double]) -> Double {
+        let count = Double(intervals.count)
+        guard count > 1 else { return 0 } // Safety for N-1
+        let mean = intervals.reduce(0, +) / count
+        let sumOfSquaredDiffs = intervals.map { pow($0 - mean, 2.0) }.reduce(0, +)
+        return sqrt(sumOfSquaredDiffs / (count - 1))
     }
     
-    private func calculateSDNN(from timestamps: [TimeInterval]) -> Double? {
-        guard timestamps.count > 10 else { 
-            print("DIAG: Insufficient heartbeats for HRV calculation (\(timestamps.count))")
-            return nil 
-        }
-        
-        // 1. Convert timestamps into gaps (intervals between beats)
-        var allGaps: [Double] = []
-        for i in 1..<timestamps.count {
-            let gap = (timestamps[i] - timestamps[i-1]) * 1000.0 // in milliseconds
-            if gap > 300 && gap < 2000 { // Basic physical range
-                allGaps.append(gap)
-            }
-        }
-        
-        guard allGaps.count > 10 else { return nil }
-        
-        // 2. Identify the MEDIAN gap to define the "true" rhythm for this minute
-        let sortedGaps = allGaps.sorted()
-        let median = sortedGaps[sortedGaps.count / 2]
-        
-        // 3. Filter out gaps that deviate too far from the median (e.g. > 30%)
-        // This effectively ignores missed beats or double-counts that skew the SDNN.
-        let filteredGaps = allGaps.filter { gap in
-            let deviation = abs(gap - median) / median
-            return deviation < 0.30 
-        }
-        
-        guard filteredGaps.count > 5 else { 
-            print("DIAG: Insufficient valid gaps after dynamic filtering (\(filteredGaps.count))")
-            return nil 
-        }
-        
-        // 4. Mathematical SDNN Calculation
-        let count = Double(filteredGaps.count)
-        let mean = filteredGaps.reduce(0, +) / count
-        let sumOfSquaredDiffs = filteredGaps.map { pow($0 - mean, 2.0) }.reduce(0, +)
-        let sdnn = sqrt(sumOfSquaredDiffs / count)
-        
-        print("DIAG: SDNN Logic - Median: \(Int(median))ms, Filtered Beats: \(filteredGaps.count), SDNN: \(Int(sdnn))ms")
-        
-        // 5. Final Sanity Check: If SDNN is still > 200, it's almost certainly recording noise
-        if sdnn > 200 {
-            print("DIAG: SDNN still high (\(sdnn)), likely noisy recording.")
-            return nil
-        }
-        
-        return sdnn
-    }
+    // Simplified Math Logic: BPM-based SD calculation
     
     // MARK: - Measurement Session (Forcing Beat-to-Beat Data)
     
@@ -214,7 +155,7 @@ class HealthKitManager: NSObject { // Defines the HealthKitManager class to mana
         let authStatus = healthStore.authorizationStatus(for: HKSeriesType.heartbeat())
 
         let configuration = HKWorkoutConfiguration()
-        configuration.activityType = .yoga // Yoga is consistent for forcing beat-to-beat data
+        configuration.activityType = .mindAndBody // prioritized for high-resolution heart pulse data
         configuration.locationType = .indoor
         
         do {
@@ -266,6 +207,7 @@ class HealthKitManager: NSObject { // Defines the HealthKitManager class to mana
     }
 }
 
+
 // MARK: 2. App Logic (ViewModel)
 
 
@@ -294,19 +236,15 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
     @Published var isMeasuring: Bool = false
     @Published var measurementCountdown: Double = 60.0
     @Published var showStressQuestionnaire: Bool = false
-    @Published var lastValidBeats: Int = 0
-    @Published var lastResultDate: Date? = nil
-    @Published var lastControlBPM: Double? = nil // V7 Diagnostic
+    @Published var currentSessionBPMs: [Double] = []   // V17: Live capture during session
+    private var lastCapturedSecond: Int = -1
+    private var lastCapturedBPMDate: Date? = nil      // V18: Prevent duplicates
+    @Published var lastSessionStartDate: Date? = nil // Fix: Track session start for strict fetching
     private var lastMeasuredHRV: Double? = nil
     
     // Safety Getters for UI
     var hrvString: String {
         guard let val = hrvValue else { return "--" }
-        return String(format: "%.0f", val)
-    }
-    
-    var bpmString: String {
-        guard let val = lastControlBPM else { return "--" }
         return String(format: "%.0f", val)
     }
     
@@ -404,7 +342,6 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
      * Reset Calibration: Clears all calibration data and restarts the process.
      */
     func resetCalibration() {
-        print("ACTION: StressNotOnMyWatchManager.resetCalibration started")
         isCalibrating = true
         calibrationStartDate = Date()
         stressedReadings = []
@@ -415,16 +352,11 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
         userGender = "Prefer not to say"
         saveCalibrationData()
         checkCalibrationStatus()
-        // Optionally, update UI status
-        statusText = "Calibration Reset"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            self.statusText = "Hourly Check"
-        }
+        statusText = "Ready"
     }
 
     // Public method used by the UI button
     func resetBaseline() {
-        print("ACTION: StressNotOnMyWatchManager.resetBaseline called")
         resetCalibration()
     }
     
@@ -448,22 +380,23 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
      * Start "Stay Still" Session: 90 seconds of forced heartbeat recording.
      */
     func startStayStillSession() {
-        print("ACTION: StressNotOnMyWatchManager.startStayStillSession started")
         guard !isMeasuring else { return }
         
-        // Safety: Invalidate any old timer
         sessionTimer?.invalidate()
         
         isMeasuring = true
         measurementCountdown = 60.0
         statusText = "Stay Still..."
+        currentSessionBPMs = []
+        lastCapturedSecond = -1
+        lastCapturedBPMDate = nil
+        lastSessionStartDate = Date()
         
         healthKitManager.startMeasurementSession()
         
         let startTime = Date()
         let totalDuration: Double = 60.0
         
-        // Use a faster timer (0.1s) for smooth UI and better accuracy
         sessionTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] timer in
             guard let self = self else {
                 timer.invalidate()
@@ -472,8 +405,15 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
             
             let elapsed = Date().timeIntervalSince(startTime)
             let remaining = max(0, totalDuration - elapsed)
+            let currentSecond = Int(elapsed)
             
             self.measurementCountdown = remaining
+            
+            // Capture every 10 seconds (10, 20, 30, 40, 50, 60)
+            if currentSecond > 0 && currentSecond % 10 == 0 && currentSecond != self.lastCapturedSecond {
+                self.lastCapturedSecond = currentSecond
+                self.captureSnapshotBPM()
+            }
             
             if remaining <= 0 {
                 timer.invalidate()
@@ -482,68 +422,87 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
         }
     }
     
-    private func finishStayStillSession() {
-        print("ACTION: StressNotOnMyWatchManager.finishStayStillSession started")
+    private func captureSnapshotBPM() {
+        let startTime = lastSessionStartDate ?? Date()
+        let queryStart = startTime.addingTimeInterval(-15)
         
-        // V12: Increased to 5 seconds to ensure HealthKit flushes the series to disk
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [weak self] in
-            guard let self = self else { return }
+        healthKitManager.fetchControlHeartRate(since: queryStart) { [weak self] bpm, date, _ in
+            guard let self = self, let bpm = bpm, let date = date else { return }
             
-            self.healthKitManager.stopMeasurementSession { [weak self] success in
-                guard let self = self else { return }
-                print("DIAG: stopMeasurementSession completion - success: \(success)")
-                
-                // Wait another short moment post-stop before fetching. 
-                // Start with a very high retry count (e.g., 30 * 2s = 60s) to persistently wait for data.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    self.fetchAndDisplayResults(retryCount: 30) 
+            DispatchQueue.main.async {
+                // Restore Deduplication: Only count if this is a newer reading than the last one we stole
+                if self.lastCapturedBPMDate == nil || date > self.lastCapturedBPMDate! {
+                    self.lastCapturedBPMDate = date
+                    self.currentSessionBPMs.append(bpm)
                 }
             }
         }
     }
     
+    private func finishStayStillSession() {
+        self.healthKitManager.stopMeasurementSession { [weak self] success in
+            guard let self = self else { return }
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.fetchAndDisplayResults(retryCount: 10) 
+            }
+        }
+    }
+    
     private func fetchAndDisplayResults(retryCount: Int) {
-        self.healthKitManager.fetchManualHRV { [weak self] hrv, beats, date, error, bpm in
+        if currentSessionBPMs.count >= 6 {
+            // Enforce strict limit: only use first 6 samples
+            let samples = Array(currentSessionBPMs.prefix(6))
+            let count = samples.count
+            
+            // Round to nearest integer millisecond to match standard HRV data
+            let intervals = samples.map { round(60000.0 / max(1.0, $0)) }
+            
+            let countD = Double(intervals.count)
+            guard countD > 1 else { return } // Safety for N-1
+            
+            let mean = intervals.reduce(0, +) / countD
+            let sumSq = intervals.map { pow($0 - mean, 2.0) }.reduce(0, +)
+            let sd = sqrt(sumSq / (countD - 1))
+            
+            self.lastMeasuredHRV = sd
+            self.hrvValue = sd
+            
+            self.isMeasuring = false
+            if self.isCalibrating {
+                self.measurementCount += 1
+                self.checkCalibrationStatus()
+            } else {
+                self.updateDetectionStatus()
+            }
+            self.showStressQuestionnaire = true
+            self.statusText = "Done"
+            return
+        }
+        
+        self.healthKitManager.fetchManualBPMSeries(since: self.lastSessionStartDate, statusUpdate: { _ in }) { [weak self] hrv, count, date, error, bpm in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                
-                self.lastValidBeats = beats
-                self.lastResultDate = date
-                self.lastControlBPM = bpm
                 
                 if let hrv = hrv {
                     self.lastMeasuredHRV = hrv
                     self.hrvValue = hrv
                     self.isMeasuring = false
                     if self.isCalibrating {
-                        // Increment measurement count for calibration tracking
                         self.measurementCount += 1
-                        // Check if calibration can end
                         self.checkCalibrationStatus()
                     } else {
                         self.updateDetectionStatus()
                     }
                     self.showStressQuestionnaire = true
-                    self.statusText = self.isCalibrating ? "Reporting..." : "Done"
-                    print("ACTION: HRV Measurement COMPLETED (Value: \(hrv)ms, Beats: \(beats), isCalibrating: \(self.isCalibrating), measurementCount: \(self.measurementCount))")
+                    self.statusText = "Done"
                 } else if retryCount > 0 {
-                    // Retry with a delay. Update status so user knows we are waiting.
-                    self.statusText = "Analyzing (\(retryCount))..."
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
                         self.fetchAndDisplayResults(retryCount: retryCount - 1)
                     }
                 } else {
                     self.isMeasuring = false
-                    if beats == -1 {
-                        self.statusText = "BPM Only"
-                    } else if beats == 0 && date == nil {
-                        self.statusText = "No Series"
-                    } else if beats == 0 {
-                        self.statusText = "Empty Series"
-                    } else {
-                        self.statusText = "Noisy Data"
-                    }
-                    print("DIAG: No HRV data retrieved. Status: \(self.statusText), Beats: \(beats)")
+                    self.statusText = "Try Again"
                 }
             }
         }
@@ -580,9 +539,7 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
     }
     
     func dismissQuestionnaire() {
-        print("ACTION: StressNotOnMyWatchManager.dismissQuestionnaire")
         if isMeasuring && !showStressQuestionnaire {
-            // Cancelled during countdown
             healthKitManager.stopMeasurementSession { _ in }
         }
         showStressQuestionnaire = false
@@ -599,23 +556,15 @@ class StressNotOnMyWatchManager: ObservableObject { // Defines the StressNotOnMy
         let hoursElapsed = Int(Date().timeIntervalSince(startDate) / 3600)
         calibrationHour = hoursElapsed + 1
         
-        // End calibration only when both conditions are met:
-        //   • At least six successful measurements have been recorded
-        //   • At least one hour has elapsed since calibration started
         if measurementCount >= 6 && hoursElapsed >= 1 {
             isCalibrating = false
-            // Calculate threshold: Average of stressed readings.
             if !stressedReadings.isEmpty {
                 customThreshold = stressedReadings.reduce(0, +) / Double(stressedReadings.count)
             } else if !calmReadings.isEmpty {
-                // Fallback: 20% below calm average if no stress reported
                 let avgCalm = calmReadings.reduce(0, +) / Double(calmReadings.count)
                 customThreshold = avgCalm * 0.8
             }
-            print("ACTION: Calibration period ended (measurements: \(measurementCount), hours: \(hoursElapsed)). Threshold calculated: \(customThreshold ?? 0)")
             saveCalibrationData()
-        } else {
-            print("DIAG: Calibration ongoing – measurements: \(measurementCount), hours elapsed: \(hoursElapsed)")
         }
     }
     
@@ -865,7 +814,7 @@ struct ContentView: View { // Defines the main SwiftUI view for the watch app.
                         }
                         .frame(width: 80, height: 80)
                         
-                        Text("Measuring Heart Rate...")
+                        Text(manager.statusText)
                             .font(.caption2)
                             .foregroundColor(.gray)
                     }
@@ -894,25 +843,9 @@ struct ContentView: View { // Defines the main SwiftUI view for the watch app.
                                 Text("\(Int(hrv))")
                                     .font(.system(size: 30, weight: .bold, design: .rounded))
                                     .foregroundColor(.blue)
-                                Text("ms").font(.caption2).foregroundColor(.gray)
-                                
-                                // Diagnostics
-                                HStack(spacing: 10) {
-                                    VStack {
-                                        Text("\(manager.lastValidBeats)").font(.caption2).fontWeight(.bold)
-                                        Text("BEATS").font(.system(size: 8))
-                                    }
-                                    .foregroundColor(.blue)
-                                    
-                                    if let date = manager.lastResultDate {
-                                        VStack {
-                                            Text(date, style: .time).font(.caption2).fontWeight(.bold)
-                                            Text("SAMPLED").font(.system(size: 8))
-                                        }
-                                        .foregroundColor(.blue)
-                                    }
-                                }
-                                .padding(.top, 4)
+                                Text("ms")
+                                    .font(.caption2)
+                                    .foregroundColor(.gray)
                             }
                         }
                         
