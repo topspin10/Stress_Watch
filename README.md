@@ -4,6 +4,9 @@ What you need to test:
 3. a computer
 4. something to plug the paired iPhone in your computer
 5. an Apple ID
+
+
+
 To test:
 1. Open your computer and install Xcode.
 2. When installed create a new project in Xcode (you need an Apple ID to put in when it asks).
@@ -15,3 +18,12 @@ To test:
 8. Turn Developer Mode on for the watch as well: Settings - Privacy and Security and scroll down (this will probably restart the watch).
 9. Look at the play button. Move your gaze across to the right until you see where you can choose your simulator. Choose your watch (you can also go to the top bar. Then look for Product - Destination and choose a your watch).
 10. In the Project Navigator in Xcode click the blue project icon next to your project name 
+
+
+
+If the watch doesn't connect with the computer:
+1. Unplug iPhone
+2. On the iPhone and apple watch go to Settings-Developer and clear trusted computers
+3. Then in Xcode go to the top menu bar and select Window-Devices and Simulators. Double click the iPhone and apple watch and select unpair device.
+4. Replug in the iPhone with the computer.
+5. When the iPhone and apple watch ask "Trust this computer?" select trust and type in your passcode.
