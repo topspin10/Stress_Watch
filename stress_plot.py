@@ -2,7 +2,6 @@ import sys
 print("Starting script...")
 import pandas as pd
 import matplotlib
-matplotlib.use('Agg') # Force non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
 
